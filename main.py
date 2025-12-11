@@ -27,15 +27,19 @@ else:
 TARGET_REACTION = os.environ.get("TARGET_REACTION", "summary-text").strip(":")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
+# Load prompt from file
+PROMPT_TEMPLATE = ""
+try:
+    with open(os.path.join(os.path.dirname(__file__), "prompt.txt"), "r", encoding="utf-8") as f:
+        PROMPT_TEMPLATE = f.read()
+except Exception as e:
+    logger.error(f"Error reading prompt.txt: {e}")
+    PROMPT_TEMPLATE = "要約してください：\n\n" # Fallback
+
 @app.middleware
 def ignore_retry(request, next):
     if "x-slack-retry-num" in request.headers:
         logger.info(f"Ignoring retry request: {request.headers.get('x-slack-retry-num')}")
-        # Acknowledging retry requests immediately to stop them,
-        # though usually we just want to ignore execution.
-        # Returning None or Response(200) stops the chain.
-        # Slack Bolt expects middleware to call next() to continue.
-        # If we return a response, it stops.
         return slack_bolt.BoltResponse(status=200, body="Ignored retry")
     next()
 
@@ -53,8 +57,6 @@ def get_user_name(user_id, client, user_cache):
     except Exception as e:
         logger.error(f"Error fetching user info for {user_id}: {e}")
 
-    # Fallback to ID but don't cache failure in case it's transient,
-    # or maybe cache it to avoid retrying bad IDs? Let's not cache failure for now.
     return user_id
 
 def format_conversation(messages, client):
@@ -74,15 +76,7 @@ def format_conversation(messages, client):
 def summarize_text(text):
     try:
         model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-        prompt = (
-            "以下のSlackスレッドの会話を要約してください。\n"
-            "出力フォーマットは以下のようにしてください：\n\n"
-            "**サマリー**\n(ここに要約)\n\n"
-            "**結論**\n(ここに結論)\n\n"
-            "**ネクストアクション**\n(誰が何を行うか)\n\n"
-            "---\n"
-            f"{text}"
-        )
+        prompt = f"{PROMPT_TEMPLATE}{text}"
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:

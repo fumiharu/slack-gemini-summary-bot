@@ -11,12 +11,18 @@ This bot summarizes Slack threads using Google Gemini when a specific reaction (
 
 ### 1. Slack App Configuration
 
-1.  Go to [Slack API Apps](https://api.slack.com/apps) and create a new app "From an app manifest".
+1.  Go to [Slack API Apps](https://api.slack.com/apps) and create a new app "From scratch".
 2.  Select your workspace.
-3.  Copy the content of `manifest.yaml` from this repository and paste it into the YAML editor.
-4.  Create the app.
-5.  Install the app to your workspace.
-6.  Note down the **Bot User OAuth Token** (`xoxb-...`) and **Signing Secret** (Basic Information > App Credentials).
+3.  **Bot Token Scopes**: Go to **OAuth & Permissions** and add the following scopes under "Bot Token Scopes":
+    *   `channels:history`
+    *   `groups:history`
+    *   `im:history`
+    *   `mpim:history`
+    *   `reactions:read`
+    *   `chat:write`
+    *   `users:read`
+4.  **Install App**: Install the app to your workspace.
+5.  **Credentials**: Note down the **Bot User OAuth Token** (`xoxb-...`) and **Signing Secret** (Basic Information > App Credentials).
 
 ### 2. Google Cloud Functions Deployment
 
@@ -51,8 +57,10 @@ You can deploy this bot to Google Cloud Functions (2nd Gen) using the gcloud CLI
 
 1.  After deployment, get the **Function URL** (e.g., `https://...run.app`).
 2.  Go back to your Slack App settings > **Event Subscriptions**.
-3.  Paste the Function URL into the **Request URL** field. It should verify successfully.
-4.  Re-install the app if prompted.
+3.  Enable Events and paste the Function URL into the **Request URL** field. It should verify successfully.
+4.  **Subscribe to Bot Events**: Add the `reaction_added` event under "Subscribe to bot events".
+5.  **Save Changes**: Click "Save Changes".
+6.  Re-install the app if prompted.
 
 ## Usage
 
