@@ -1,12 +1,25 @@
 import os
 import logging
-import slack_bolt
-from slack_bolt.adapter.google_cloud_functions import SlackRequestHandler
-import google.generativeai as genai
+import sys
+from unittest.mock import MagicMock
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Workaround for GCF Python runtimes missing libsqlite3
+# slack_bolt imports sqlite3 via oauth_flow, but we don't use it.
+# This prevents the app from crashing on startup in environments without sqlite3.
+try:
+    import sqlite3
+except ImportError:
+    # If sqlite3 is missing, mock it to allow slack_bolt to import.
+    # We do not use the OAuth features that require SQLite.
+    sys.modules["sqlite3"] = MagicMock()
+
+import slack_bolt
+from slack_bolt.adapter.google_cloud_functions import SlackRequestHandler
+import google.generativeai as genai
 
 # Initialize Slack App
 app = slack_bolt.App(
