@@ -94,7 +94,7 @@ def summarize_text(text):
         return response.text
     except Exception as e:
         logger.error(f"Error calling Gemini API: {e}")
-        return "申し訳ありません。要約の生成中にエラーが発生しました。"
+        return f"エラーが発生しました: {str(e)}"
 
 @app.event("reaction_added")
 def handle_reaction_added(event, client, say):
