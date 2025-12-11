@@ -1,24 +1,32 @@
 import os
 import logging
-import json
-import functions_framework
-from slack_sdk import WebClient
-from slack_sdk.signature import SignatureVerifier
-from slack_sdk.errors import SlackApiError
-import google.generativeai as genai
+import sys
+from unittest.mock import MagicMock
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Slack components
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+# Workaround for GCF Python runtimes missing libsqlite3
+# slack_bolt imports sqlite3 via oauth_flow, but we don't use it.
+# This prevents the app from crashing on startup in environments without sqlite3.
+try:
+    import sqlite3
+except ImportError:
+    # If sqlite3 is missing, mock it to allow slack_bolt to import.
+    # We do not use the OAuth features that require SQLite.
+    sys.modules["sqlite3"] = MagicMock()
 
-# We can initialize client lazily or here.
-# WebClient does NOT depend on sqlite3.
-client = WebClient(token=SLACK_BOT_TOKEN)
-signature_verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
+import slack_bolt
+from slack_bolt.adapter.google_cloud_functions import SlackRequestHandler
+import google.generativeai as genai
+
+# Initialize Slack App
+app = slack_bolt.App(
+    token=os.environ.get("SLACK_BOT_TOKEN"),
+    signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
+    process_before_response=True,
+)
 
 # Initialize Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -28,6 +36,7 @@ else:
     logger.warning("GEMINI_API_KEY is not set.")
 
 # Configuration
+# Strip colons just in case user configures it as :emoji:
 TARGET_REACTION = os.environ.get("TARGET_REACTION", "summary-text").strip(":")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
@@ -38,9 +47,16 @@ try:
         PROMPT_TEMPLATE = f.read()
 except Exception as e:
     logger.error(f"Error reading prompt.txt: {e}")
-    PROMPT_TEMPLATE = "要約してください：\n\n"
+    PROMPT_TEMPLATE = "要約してください：\n\n" # Fallback
 
-def get_user_name(user_id, user_cache):
+@app.middleware
+def ignore_retry(request, next):
+    if "x-slack-retry-num" in request.headers:
+        logger.info(f"Ignoring retry request: {request.headers.get('x-slack-retry-num')}")
+        return slack_bolt.BoltResponse(status=200, body="Ignored retry")
+    next()
+
+def get_user_name(user_id, client, user_cache):
     if user_id in user_cache:
         return user_cache[user_id]
 
@@ -56,7 +72,7 @@ def get_user_name(user_id, user_cache):
 
     return user_id
 
-def format_conversation(messages):
+def format_conversation(messages, client):
     formatted_text = ""
     user_cache = {} # Local cache for this request
 
@@ -64,7 +80,7 @@ def format_conversation(messages):
         user_id = msg.get("user")
         text = msg.get("text", "")
         if user_id:
-            user_name = get_user_name(user_id, user_cache)
+            user_name = get_user_name(user_id, client, user_cache)
             formatted_text += f"{user_name}: {text}\n"
         else:
             formatted_text += f"System/Bot: {text}\n"
@@ -80,13 +96,8 @@ def summarize_text(text):
         logger.error(f"Error calling Gemini API: {e}")
         return "申し訳ありません。要約の生成中にエラーが発生しました。"
 
-def process_event(event):
-    type = event.get("type")
-
-    if type == "reaction_added":
-        handle_reaction_added(event)
-
-def handle_reaction_added(event):
+@app.event("reaction_added")
+def handle_reaction_added(event, client, say):
     reaction = event.get("reaction")
 
     # Robust check: strip colons
@@ -116,6 +127,8 @@ def handle_reaction_added(event):
         target_message = messages[0]
         thread_ts = target_message.get("thread_ts")
 
+        # Determine the parent thread timestamp
+        # If thread_ts is missing, the message itself is the start of a potential thread
         parent_ts = thread_ts if thread_ts else ts
 
         # Now fetch all replies
@@ -131,7 +144,7 @@ def handle_reaction_added(event):
             return
 
         # Format conversation
-        conversation_text = format_conversation(thread_messages)
+        conversation_text = format_conversation(thread_messages, client)
 
         # Summarize
         summary = summarize_text(conversation_text)
@@ -146,51 +159,7 @@ def handle_reaction_added(event):
     except Exception as e:
         logger.error(f"Error handling reaction: {e}")
 
-@functions_framework.http
+handler = SlackRequestHandler(app)
+
 def summary_bot(request):
-    """
-    HTTP Cloud Function entry point.
-    """
-    # 1. Verify Request Signature
-    if not signature_verifier.is_valid_request(request.get_data(), request.headers):
-        logger.warning("Invalid request signature")
-        return "Invalid signature", 403
-
-    # 2. Parse Body
-    try:
-        body = request.get_json()
-    except Exception:
-        return "Bad Request", 400
-
-    # 3. Handle URL Verification (for Slack App setup)
-    if body.get("type") == "url_verification":
-        return body.get("challenge")
-
-    # 4. Handle Retries
-    # Slack sends 'x-slack-retry-num' header on retries.
-    # We ignore them to avoid duplicate processing.
-    if "x-slack-retry-num" in request.headers:
-        logger.info(f"Ignoring retry request: {request.headers.get('x-slack-retry-num')}")
-        return "Ignored retry", 200
-
-    # 5. Handle Events
-    if body.get("type") == "event_callback":
-        event = body.get("event", {})
-        # Process in background?
-        # For simplicity and GCF Gen2 (which handles concurrency better),
-        # we process synchronously but rely on 200 OK being final.
-        # Note: Slack expects 200 OK within 3s. If logic is slow,
-        # we might need to push to Pub/Sub or return 200 first.
-        # But user wants a simple summary bot.
-        # If we just return 200 and process, GCF might kill the process?
-        # GCF Gen 2 keeps running until response is sent.
-        # If we wait for Gemini, we might timeout Slack's 3s.
-        # But we handle retries, so the first timeout is "fine" provided we eventually finish.
-        # The retry handler above prevents the SECOND execution.
-        # The FIRST execution continues to run even if Slack gives up waiting for the 200 OK.
-        # (This depends on GCF behavior: usually it keeps running until function timeout).
-
-        process_event(event)
-        return "OK", 200
-
-    return "Not Found", 404
+    return handler.handle(request)
